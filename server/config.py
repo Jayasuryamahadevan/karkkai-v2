@@ -26,6 +26,14 @@ HOST = os.getenv("HOST", "127.0.0.1")
 PORT = int(os.getenv("PORT", "8787"))
 
 TRANSLATION_ENGINE = os.getenv("TRANSLATION_ENGINE", "auto").strip().lower()
+MOZHI_HOSTS = tuple(
+    host.strip().rstrip("/")
+    for host in os.getenv(
+        "MOZHI_HOSTS",
+        "https://mozhi.aryak.me,https://mozhi.ducks.party,https://translate.projectsegfau.lt",
+    ).split(",")
+    if host.strip()
+)
 MYMEMORY_EMAIL = os.getenv("MYMEMORY_EMAIL", "").strip()
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "").strip()
 SARVAM_TRANSLATE_MODEL = os.getenv("SARVAM_TRANSLATE_MODEL", "mayura:v1").strip()
@@ -47,7 +55,7 @@ PDF_TIMEOUT = int(os.getenv("PDF_TIMEOUT", "150"))
 def online_status() -> dict:
     return {
         "translation": {
-            "bing": True,
+            "mozhi": True,
             "mymemory": True,
             "sarvam": bool(SARVAM_API_KEY),
         },

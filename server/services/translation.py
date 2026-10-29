@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
-import threading
 import time
 from typing import Any
 
 import requests
 
 from server.config import (
+    MOZHI_HOSTS,
     MYMEMORY_EMAIL,
     SARVAM_API_KEY,
     SARVAM_TRANSLATE_MODEL,
@@ -33,16 +32,16 @@ USER_AGENT = (
 )
 
 PROVIDER_LABELS = {
-    "bing": "Bing Translator",
+    "mozhi": "Yandex Translator",
     "mymemory": "MyMemory",
     "sarvam": "Sarvam AI",
 }
 
-# Bing expects a handful of non-standard codes.
-BING_LANG_ALIASES = {
-    "zh": "zh-Hans",
-    "zh-cn": "zh-Hans",
-    "zh-tw": "zh-Hant",
+# Mozhi delegates to Yandex, which uses slightly different codes for Chinese.
+MOZHI_LANG_ALIASES = {
+    "zh-cn": "zh",
+    "zh-tw": "zh",
+    "zh": "zh",
 }
 
 SARVAM_LANGS = {
@@ -75,8 +74,6 @@ class TranslationService:
             }
         )
         self.cache = TTLCache(ttl_seconds=6 * 3600, max_items=512)
-        self._bing_lock = threading.Lock()
-        self._bing_auth: dict[str, Any] | None = None
 
     # ----------------------------------------------------------------- public
     def translate(
@@ -104,7 +101,7 @@ class TranslationService:
             }
 
         preferred = (engine or TRANSLATION_ENGINE or "auto").strip().lower()
-        if preferred not in {"auto", "bing", "mymemory", "sarvam"}:
+        if preferred not in {"auto", "mozhi", "mymemory", "sarvam"}:
             preferred = "auto"
 
         cache_key = (
@@ -135,8 +132,8 @@ class TranslationService:
         used_provider = ""
         for provider in providers:
             try:
-                if source == "auto" and provider == "bing":
-                    translated, detected_by_provider = self._bing(text, "auto", target)
+                if source == "auto" and provider == "mozhi":
+                    translated, detected_by_provider = self._mozhi(text, "auto", target)
                     if detected_by_provider:
                         detected = detected_by_provider
                 else:
@@ -174,7 +171,7 @@ class TranslationService:
     def status(self) -> dict[str, Any]:
         return {
             "available": {
-                "bing": True,
+                "mozhi": True,
                 "mymemory": True,
                 "sarvam": bool(SARVAM_API_KEY),
             },
@@ -184,13 +181,13 @@ class TranslationService:
 
     # -------------------------------------------------------------- providers
     def _provider_order(self, preferred: str) -> list[str]:
-        if preferred == "bing":
-            return ["bing", "mymemory"] + (["sarvam"] if SARVAM_API_KEY else [])
+        if preferred == "mozhi":
+            return ["mozhi", "mymemory"] + (["sarvam"] if SARVAM_API_KEY else [])
         if preferred == "mymemory":
-            return ["mymemory", "bing"] + (["sarvam"] if SARVAM_API_KEY else [])
+            return ["mymemory", "mozhi"] + (["sarvam"] if SARVAM_API_KEY else [])
         if preferred == "sarvam":
-            return (["sarvam"] if SARVAM_API_KEY else []) + ["bing", "mymemory"]
-        order = ["bing", "mymemory"]
+            return (["sarvam"] if SARVAM_API_KEY else []) + ["mozhi", "mymemory"]
+        order = ["mozhi", "mymemory"]
         if SARVAM_API_KEY:
             order.append("sarvam")
         return order
@@ -198,8 +195,8 @@ class TranslationService:
     def _translate_with(
         self, provider: str, text: str, source: str, target: str
     ) -> str:
-        if provider == "bing":
-            translated, _ = self._bing(text, source, target)
+        if provider == "mozhi":
+            translated, _ = self._mozhi(text, source, target)
             return translated
         if provider == "mymemory":
             return self._mymemory(text, source, target)
@@ -207,15 +204,14 @@ class TranslationService:
             return self._sarvam(text, source, target)
         raise TranslationError(f"Unknown translation provider: {provider}")
 
-    def _bing(
+    def _mozhi(
         self, text: str, source: str, target: str
     ) -> tuple[str, str | None]:
-        """Translate through Bing's public web translator.
+        """Translate through a public Mozhi instance (Yandex engine).
 
-        Bing's site is free and needs no account. Its widgets fetch a short-lived
-        token from the translator page, then post text to ``ttranslatev3``. The
-        token and cookies are reused until they expire, after which the token is
-        refreshed automatically.
+        Mozhi is a free, open-source translation front-end that needs no account
+        or API key. We try several public instances in order so a single outage
+        does not break translation.
         """
         paragraphs: list[str] = []
         detected: str | None = None
@@ -223,97 +219,50 @@ class TranslationService:
             if not paragraph.strip():
                 paragraphs.append("")
                 continue
-            chunks = group_chunks(split_sentences(paragraph), 900) or [paragraph]
+            chunks = group_chunks(split_sentences(paragraph), 1500) or [paragraph]
             parts: list[str] = []
             for chunk in chunks:
-                translated, chunk_lang = self._bing_chunk(chunk, source, target)
+                translated, chunk_lang = self._mozhi_chunk(chunk, source, target)
                 parts.append(translated)
                 if detected is None and chunk_lang:
                     detected = chunk_lang
             paragraphs.append(" ".join(parts))
         return "\n".join(paragraphs), detected
 
-    def _bing_chunk(
+    def _mozhi_chunk(
         self, text: str, source: str, target: str
     ) -> tuple[str, str | None]:
-        from_lang = "auto-detect" if source == "auto" else source
-        to_lang = BING_LANG_ALIASES.get(target.lower(), target)
-        with self._bing_lock:
-            last_error: Exception | None = None
-            for attempt in range(2):
-                try:
-                    auth = self._bing_auth
-                    if not auth or auth["expires"] <= time.time():
-                        auth = self._bing_refresh_auth()
-                    response = self.session.post(
-                        auth["url"],
-                        data={
-                            "fromLang": from_lang,
-                            "text": text,
-                            "to": to_lang,
-                            "token": auth["token"],
-                            "key": auth["key"],
-                        },
-                        headers={
-                            "Referer": "https://www.bing.com/translator",
-                            "Origin": "https://www.bing.com",
-                        },
-                        timeout=TRANSLATE_TIMEOUT,
-                    )
-                    if response.status_code != 200 or "ShowCaptcha" in response.text:
-                        raise TranslationError(
-                            f"Bing HTTP {response.status_code}"
-                        )
-                    data = response.json()
-                    items = data if isinstance(data, list) else [data]
-                    parts: list[str] = []
-                    detected: str | None = None
-                    for item in items:
-                        if not isinstance(item, dict):
-                            continue
-                        for row in item.get("translations") or []:
-                            if isinstance(row, dict) and row.get("text"):
-                                parts.append(str(row["text"]))
-                        lang = item.get("detectedLanguage") or {}
-                        if isinstance(lang, dict) and lang.get("language"):
-                            detected = str(lang["language"])
-                    translated = "".join(parts)
-                    if translated.strip():
-                        return translated, detected
-                    raise TranslationError("Bing returned no text")
-                except Exception as exc:
-                    last_error = exc
-                    self._bing_auth = None
-                    if attempt == 0:
-                        time.sleep(0.25)
-            raise TranslationError(f"Bing Translate failed: {last_error}")
-
-    def _bing_refresh_auth(self) -> dict[str, Any]:
-        response = self.session.get(
-            "https://www.bing.com/translator", timeout=TRANSLATE_TIMEOUT
-        )
-        if response.status_code != 200:
-            raise TranslationError(f"Bing page HTTP {response.status_code}")
-        page = response.text
-        ig = re.search(r'IG:"([^"]+)"', page)
-        iid = re.search(r'data-iid="(translator\.\d+)"', page)
-        helper = re.search(
-            r'params_AbusePreventionHelper\s*=\s*\[(\d+),"([^"]+)",(\d+)\]',
-            page,
-        )
-        if not (ig and iid and helper):
-            raise TranslationError("Bing translator page changed")
-        key, token, interval_ms = helper.group(1), helper.group(2), int(helper.group(3))
-        self._bing_auth = {
-            "url": (
-                "https://www.bing.com/ttranslatev3"
-                f"?isVertical=1&IG={ig.group(1)}&IID={iid.group(1)}&SFX=1"
-            ),
-            "key": key,
-            "token": token,
-            "expires": time.time() + max(60.0, interval_ms / 1000 - 120),
-        }
-        return self._bing_auth
+        to_lang = MOZHI_LANG_ALIASES.get(target.lower(), target)
+        last_error: Exception | None = None
+        for host in MOZHI_HOSTS:
+            try:
+                response = self.session.get(
+                    f"{host}/api/translate",
+                    params={
+                        "engine": "yandex",
+                        "from": source,
+                        "to": to_lang,
+                        "text": text,
+                    },
+                    timeout=TRANSLATE_TIMEOUT,
+                )
+                if response.status_code != 200:
+                    raise TranslationError(f"Mozhi HTTP {response.status_code}")
+                payload = response.json()
+                translated = (
+                    payload.get("translated-text")
+                    or payload.get("translated_text")
+                    or ""
+                )
+                if not str(translated).strip():
+                    raise TranslationError("Mozhi returned no text")
+                lang = payload.get("detected") or None
+                return str(translated), (str(lang) if lang else None)
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Mozhi host %s failed: %s", host, exc)
+                continue
+        raise TranslationError(f"Mozhi Translate failed: {last_error}")
 
     def _mymemory(self, text: str, source: str, target: str) -> str:
         if source == "auto":

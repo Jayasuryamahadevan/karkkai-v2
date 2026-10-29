@@ -329,10 +329,10 @@ function settingsMarkup() {
       <p>Translation and voice use online services. Choose a preference; Chillian quietly falls back if an engine is unavailable.</p>
       <div class="settings-card">
         <div class="settings-row">
-          <div class="row-copy"><strong>Translation</strong><span>Bing is the default. MyMemory is the fallback.</span></div>
+          <div class="row-copy"><strong>Translation</strong><span>Yandex is the default. MyMemory is the fallback.</span></div>
           <select class="select" data-pref="translateEngine" aria-label="Translation engine">
             <option value="auto" ${prefs.translateEngine === "auto" ? "selected" : ""}>Auto</option>
-            <option value="bing" ${prefs.translateEngine === "bing" ? "selected" : ""}>Bing</option>
+            <option value="mozhi" ${prefs.translateEngine === "mozhi" ? "selected" : ""}>Yandex</option>
             <option value="mymemory" ${prefs.translateEngine === "mymemory" ? "selected" : ""}>MyMemory</option>
             <option value="sarvam" ${prefs.translateEngine === "sarvam" ? "selected" : ""} ${sarvamTranslation ? "" : "disabled"}>Sarvam${sarvamTranslation ? "" : " · key needed"}</option>
           </select>
@@ -364,7 +364,7 @@ function settingsMarkup() {
       <p>${health ? `Checked ${new Date(appState.healthAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · local server ${health.version || ""}` : "The local server has not answered yet."}</p>
       <div class="settings-card">
         <div class="status-list">
-          ${statusItem("Bing Translator", Boolean(online?.translation?.bing), "Online")}
+          ${statusItem("Yandex Translator", Boolean(online?.translation?.mozhi), "Online")}
           ${statusItem("MyMemory fallback", Boolean(online?.translation?.mymemory), "Online")}
           ${statusItem("Google speech voice", Boolean(online?.tts?.google), "Online")}
           ${statusItem("Sarvam AI", sarvamAvailable, "No key")}
