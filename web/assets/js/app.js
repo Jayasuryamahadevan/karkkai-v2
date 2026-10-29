@@ -317,7 +317,6 @@ function settingsMarkup() {
   const prefs = appState.prefs;
   const extraWords = loadExtraWords();
   const recents = loadRecents();
-  const sarvamAvailable = Boolean(online?.translation?.sarvam || online?.tts?.sarvam || online?.stt?.sarvam);
   const sarvamTranslation = Boolean(online?.translation?.sarvam);
   const sarvamTts = Boolean(online?.tts?.sarvam);
   const serverStt = Array.isArray(health?.stt?.server_available) ? health.stt.server_available : [];
@@ -329,7 +328,7 @@ function settingsMarkup() {
       <p>Translation and voice use online services. Choose a preference; Chillian quietly falls back if an engine is unavailable.</p>
       <div class="settings-card">
         <div class="settings-row">
-          <div class="row-copy"><strong>Translation</strong><span>Yandex is the default. MyMemory is the fallback.</span></div>
+          <div class="row-copy"><strong>Translation</strong><span>Sarvam AI is the default. Yandex and MyMemory are the fallbacks.</span></div>
           <select class="select" data-pref="translateEngine" aria-label="Translation engine">
             <option value="auto" ${prefs.translateEngine === "auto" ? "selected" : ""}>Auto</option>
             <option value="mozhi" ${prefs.translateEngine === "mozhi" ? "selected" : ""}>Yandex</option>
@@ -364,10 +363,10 @@ function settingsMarkup() {
       <p>${health ? `Checked ${new Date(appState.healthAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · local server ${health.version || ""}` : "The local server has not answered yet."}</p>
       <div class="settings-card">
         <div class="status-list">
+          ${statusItem("Sarvam AI", Boolean(online?.translation?.sarvam), "No key")}
           ${statusItem("Yandex Translator", Boolean(online?.translation?.mozhi), "Online")}
           ${statusItem("MyMemory fallback", Boolean(online?.translation?.mymemory), "Online")}
           ${statusItem("Google speech voice", Boolean(online?.tts?.google), "Online")}
-          ${statusItem("Sarvam AI", sarvamAvailable, "No key")}
           ${statusItem("Uploaded-audio STT", serverStt.length > 0, "Key needed")}
           ${statusItem("Browser live speech", Boolean(health?.stt?.browser), "Chrome / Edge")}
           ${statusItem("Tamil dictionary", Boolean(lexicon?.ready), "Loading")}

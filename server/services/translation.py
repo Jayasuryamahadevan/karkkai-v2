@@ -132,8 +132,9 @@ class TranslationService:
         used_provider = ""
         for provider in providers:
             try:
-                if source == "auto" and provider == "mozhi":
-                    translated, detected_by_provider = self._mozhi(text, "auto", target)
+                if source == "auto" and provider in {"sarvam", "mozhi"}:
+                    detector = self._sarvam if provider == "sarvam" else self._mozhi
+                    translated, detected_by_provider = detector(text, "auto", target)
                     if detected_by_provider:
                         detected = detected_by_provider
                 else:
@@ -187,9 +188,8 @@ class TranslationService:
             return ["mymemory", "mozhi"] + (["sarvam"] if SARVAM_API_KEY else [])
         if preferred == "sarvam":
             return (["sarvam"] if SARVAM_API_KEY else []) + ["mozhi", "mymemory"]
-        order = ["mozhi", "mymemory"]
-        if SARVAM_API_KEY:
-            order.append("sarvam")
+        # Prefer Sarvam when its key is configured: it has the best Tamil quality.
+        order = (["sarvam"] if SARVAM_API_KEY else []) + ["mozhi", "mymemory"]
         return order
 
     def _translate_with(
@@ -201,7 +201,8 @@ class TranslationService:
         if provider == "mymemory":
             return self._mymemory(text, source, target)
         if provider == "sarvam":
-            return self._sarvam(text, source, target)
+            translated, _ = self._sarvam(text, source, target)
+            return translated
         raise TranslationError(f"Unknown translation provider: {provider}")
 
     def _mozhi(
@@ -292,11 +293,37 @@ class TranslationService:
             results.append(translated)
         return " ".join(results)
 
-    def _sarvam(self, text: str, source: str, target: str) -> str:
+    def _sarvam(
+        self, text: str, source: str, target: str
+    ) -> tuple[str, str | None]:
         if not SARVAM_API_KEY:
             raise TranslationError("Sarvam API key is not configured")
-        if source not in SARVAM_LANGS or target not in SARVAM_LANGS:
-            raise TranslationError("Sarvam does not support this language pair")
+        if source != "auto" and source not in SARVAM_LANGS:
+            raise TranslationError("Sarvam does not support this language")
+        if target not in SARVAM_LANGS:
+            raise TranslationError("Sarvam does not support this language")
+
+        paragraphs: list[str] = []
+        detected: str | None = None
+        for paragraph in split_paragraphs(text):
+            if not paragraph.strip():
+                paragraphs.append("")
+                continue
+            # mayura:v1 accepts at most 1000 characters per request.
+            chunks = group_chunks(split_sentences(paragraph), 950) or [paragraph]
+            parts: list[str] = []
+            for chunk in chunks:
+                translated, chunk_lang = self._sarvam_chunk(chunk, source, target)
+                parts.append(translated)
+                if detected is None and chunk_lang:
+                    detected = chunk_lang
+            paragraphs.append(" ".join(parts))
+        return "\n".join(paragraphs), detected
+
+    def _sarvam_chunk(
+        self, text: str, source: str, target: str
+    ) -> tuple[str, str | None]:
+        source_code = "auto" if source == "auto" else SARVAM_LANGS[source]
         response = self.session.post(
             "https://api.sarvam.ai/translate",
             headers={
@@ -305,7 +332,7 @@ class TranslationService:
             },
             json={
                 "input": text,
-                "source_language_code": SARVAM_LANGS[source],
+                "source_language_code": source_code,
                 "target_language_code": SARVAM_LANGS[target],
                 "speaker_gender": "Female",
                 "mode": "formal",
@@ -315,7 +342,9 @@ class TranslationService:
             timeout=TRANSLATE_TIMEOUT,
         )
         if response.status_code >= 400:
-            raise TranslationError(f"Sarvam HTTP {response.status_code}: {response.text[:160]}")
+            raise TranslationError(
+                f"Sarvam HTTP {response.status_code}: {response.text[:160]}"
+            )
         payload = response.json()
         translated = (
             payload.get("translated_text")
@@ -324,7 +353,9 @@ class TranslationService:
         )
         if not isinstance(translated, str) or not translated.strip():
             raise TranslationError("Sarvam returned no text")
-        return translated
+        lang = payload.get("source_language_code")
+        detected = str(lang).split("-")[0] if isinstance(lang, str) and lang else None
+        return translated, detected
 
 
 # ------------------------------------------------------------------ helpers
