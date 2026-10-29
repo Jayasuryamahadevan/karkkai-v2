@@ -39,6 +39,7 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "").strip()
 SARVAM_TRANSLATE_MODEL = os.getenv("SARVAM_TRANSLATE_MODEL", "mayura:v1").strip()
 SARVAM_TTS_MODEL = os.getenv("SARVAM_TTS_MODEL", "bulbul:v2").strip()
 SARVAM_TTS_SPEAKER = os.getenv("SARVAM_TTS_SPEAKER", "anushka").strip()
+SARVAM_TIMEOUT = float(os.getenv("SARVAM_TIMEOUT", "60"))
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
 MAX_TRANSLATE_CHARS = int(os.getenv("MAX_TRANSLATE_CHARS", "5000"))

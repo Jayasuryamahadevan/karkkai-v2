@@ -11,6 +11,7 @@ from server.config import (
     MOZHI_HOSTS,
     MYMEMORY_EMAIL,
     SARVAM_API_KEY,
+    SARVAM_TIMEOUT,
     SARVAM_TRANSLATE_MODEL,
     TRANSLATE_TIMEOUT,
     TRANSLATION_ENGINE,
@@ -324,38 +325,61 @@ class TranslationService:
         self, text: str, source: str, target: str
     ) -> tuple[str, str | None]:
         source_code = "auto" if source == "auto" else SARVAM_LANGS[source]
-        response = self.session.post(
-            "https://api.sarvam.ai/translate",
-            headers={
-                "api-subscription-key": SARVAM_API_KEY,
-                "Content-Type": "application/json",
-            },
-            json={
-                "input": text,
-                "source_language_code": source_code,
-                "target_language_code": SARVAM_LANGS[target],
-                "speaker_gender": "Female",
-                "mode": "formal",
-                "model": SARVAM_TRANSLATE_MODEL,
-                "enable_preprocessing": True,
-            },
-            timeout=TRANSLATE_TIMEOUT,
-        )
-        if response.status_code >= 400:
-            raise TranslationError(
-                f"Sarvam HTTP {response.status_code}: {response.text[:160]}"
-            )
-        payload = response.json()
-        translated = (
-            payload.get("translated_text")
-            or payload.get("translation")
-            or payload.get("output")
-        )
-        if not isinstance(translated, str) or not translated.strip():
-            raise TranslationError("Sarvam returned no text")
-        lang = payload.get("source_language_code")
-        detected = str(lang).split("-")[0] if isinstance(lang, str) and lang else None
-        return translated, detected
+        last_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = self.session.post(
+                    "https://api.sarvam.ai/translate",
+                    headers={
+                        "api-subscription-key": SARVAM_API_KEY,
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "input": text,
+                        "source_language_code": source_code,
+                        "target_language_code": SARVAM_LANGS[target],
+                        "speaker_gender": "Female",
+                        "mode": "formal",
+                        "model": SARVAM_TRANSLATE_MODEL,
+                        "enable_preprocessing": True,
+                    },
+                    timeout=SARVAM_TIMEOUT,
+                )
+                if response.status_code == 429 or response.status_code >= 500:
+                    # Rate limits and server errors are worth retrying.
+                    raise requests.HTTPError(
+                        f"Sarvam HTTP {response.status_code}", response=response
+                    )
+                if response.status_code >= 400:
+                    # 4xx (bad key, bad language, too much text) will not fix
+                    # itself by retrying.
+                    raise TranslationError(
+                        f"Sarvam HTTP {response.status_code}: {response.text[:160]}"
+                    )
+                payload = response.json()
+                translated = (
+                    payload.get("translated_text")
+                    or payload.get("translation")
+                    or payload.get("output")
+                )
+                if not isinstance(translated, str) or not translated.strip():
+                    raise TranslationError("Sarvam returned no text")
+                lang = payload.get("source_language_code")
+                detected = (
+                    str(lang).split("-")[0]
+                    if isinstance(lang, str) and lang
+                    else None
+                )
+                return translated, detected
+            except TranslationError:
+                raise
+            except Exception as exc:  # timeouts / connection resets
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.6 * (attempt + 1))
+                    continue
+                raise TranslationError(f"Sarvam connection failed: {exc}") from exc
+        raise TranslationError(f"Sarvam failed: {last_error}")
 
 
 # ------------------------------------------------------------------ helpers
