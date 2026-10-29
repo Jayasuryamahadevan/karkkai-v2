@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
+import threading
 import time
 from typing import Any
 
@@ -31,9 +33,16 @@ USER_AGENT = (
 )
 
 PROVIDER_LABELS = {
-    "google": "Google Translate",
+    "bing": "Bing Translator",
     "mymemory": "MyMemory",
     "sarvam": "Sarvam AI",
+}
+
+# Bing expects a handful of non-standard codes.
+BING_LANG_ALIASES = {
+    "zh": "zh-Hans",
+    "zh-cn": "zh-Hans",
+    "zh-tw": "zh-Hant",
 }
 
 SARVAM_LANGS = {
@@ -66,6 +75,8 @@ class TranslationService:
             }
         )
         self.cache = TTLCache(ttl_seconds=6 * 3600, max_items=512)
+        self._bing_lock = threading.Lock()
+        self._bing_auth: dict[str, Any] | None = None
 
     # ----------------------------------------------------------------- public
     def translate(
@@ -93,7 +104,7 @@ class TranslationService:
             }
 
         preferred = (engine or TRANSLATION_ENGINE or "auto").strip().lower()
-        if preferred not in {"auto", "google", "mymemory", "sarvam"}:
+        if preferred not in {"auto", "bing", "mymemory", "sarvam"}:
             preferred = "auto"
 
         cache_key = (
@@ -124,10 +135,8 @@ class TranslationService:
         used_provider = ""
         for provider in providers:
             try:
-                if source == "auto" and provider == "google":
-                    translated, detected_by_provider = self._google(
-                        text, "auto", target, timeout=TRANSLATE_TIMEOUT
-                    )
+                if source == "auto" and provider == "bing":
+                    translated, detected_by_provider = self._bing(text, "auto", target)
                     if detected_by_provider:
                         detected = detected_by_provider
                 else:
@@ -165,7 +174,7 @@ class TranslationService:
     def status(self) -> dict[str, Any]:
         return {
             "available": {
-                "google": True,
+                "bing": True,
                 "mymemory": True,
                 "sarvam": bool(SARVAM_API_KEY),
             },
@@ -175,13 +184,13 @@ class TranslationService:
 
     # -------------------------------------------------------------- providers
     def _provider_order(self, preferred: str) -> list[str]:
-        if preferred == "google":
-            return ["google", "mymemory"] + (["sarvam"] if SARVAM_API_KEY else [])
+        if preferred == "bing":
+            return ["bing", "mymemory"] + (["sarvam"] if SARVAM_API_KEY else [])
         if preferred == "mymemory":
-            return ["mymemory", "google"] + (["sarvam"] if SARVAM_API_KEY else [])
+            return ["mymemory", "bing"] + (["sarvam"] if SARVAM_API_KEY else [])
         if preferred == "sarvam":
-            return (["sarvam"] if SARVAM_API_KEY else []) + ["google", "mymemory"]
-        order = ["google", "mymemory"]
+            return (["sarvam"] if SARVAM_API_KEY else []) + ["bing", "mymemory"]
+        order = ["bing", "mymemory"]
         if SARVAM_API_KEY:
             order.append("sarvam")
         return order
@@ -189,8 +198,8 @@ class TranslationService:
     def _translate_with(
         self, provider: str, text: str, source: str, target: str
     ) -> str:
-        if provider == "google":
-            translated, _ = self._google(text, source, target, timeout=TRANSLATE_TIMEOUT)
+        if provider == "bing":
+            translated, _ = self._bing(text, source, target)
             return translated
         if provider == "mymemory":
             return self._mymemory(text, source, target)
@@ -198,91 +207,113 @@ class TranslationService:
             return self._sarvam(text, source, target)
         raise TranslationError(f"Unknown translation provider: {provider}")
 
-    def _google(
-        self, text: str, source: str, target: str, timeout: float
+    def _bing(
+        self, text: str, source: str, target: str
     ) -> tuple[str, str | None]:
-        """Translate via the public Google Translate web endpoint.
+        """Translate through Bing's public web translator.
 
-        The ``client=at`` endpoint is the lightweight one used by Google's own
-        web widgets. It accepts POST, which lets us avoid URL length limits for
-        Tamil text. If it changes or is blocked, the caller falls back.
+        Bing's site is free and needs no account. Its widgets fetch a short-lived
+        token from the translator page, then post text to ``ttranslatev3``. The
+        token and cookies are reused until they expire, after which the token is
+        refreshed automatically.
         """
-        params = {
-            "client": "at",
-            "sl": source,
-            "tl": target,
-            "hl": "en",
-            "dt": "t",
-        }
-        last_error: Exception | None = None
-        for attempt in range(2):
-            try:
-                response = self.session.post(
-                    "https://translate.google.com/translate_a/single",
-                    params=params,
-                    data={"q": text},
-                    timeout=timeout,
-                )
-                if response.status_code != 200:
-                    raise TranslationError(f"Google HTTP {response.status_code}")
-                data = response.json()
-                segments = data[0] if isinstance(data, list) and data else []
-                translated = "".join(
-                    str(seg[0])
-                    for seg in segments
-                    if isinstance(seg, list) and seg and seg[0]
-                )
-                detected = None
-                if len(data) > 2 and isinstance(data[2], str):
-                    detected = data[2]
-                if translated.strip():
-                    return translated, detected
-                raise TranslationError("Google returned no text")
-            except Exception as exc:
-                last_error = exc
-                if attempt == 0:
-                    time.sleep(0.25)
-        # A second, simpler endpoint occasionally survives when the first is
-        # rate-limited. It is also useful on networks where ``translate.google``
-        # is blocked but ``clients5.google`` is reachable.
-        try:
-            response = self.session.get(
-                "https://clients5.google.com/translate_a/t",
-                params={
-                    "client": "dict-chrome-ex",
-                    "sl": source,
-                    "tl": target,
-                    "q": text[:1400],
-                },
-                timeout=timeout,
-            )
-            if response.status_code == 200:
-                data = response.json()
-                translated = self._flatten_google_json(data)
-                if translated.strip():
-                    return translated, None
-        except Exception as exc:
-            last_error = exc
-        raise TranslationError(f"Google Translate failed: {last_error}")
+        paragraphs: list[str] = []
+        detected: str | None = None
+        for paragraph in split_paragraphs(text):
+            if not paragraph.strip():
+                paragraphs.append("")
+                continue
+            chunks = group_chunks(split_sentences(paragraph), 900) or [paragraph]
+            parts: list[str] = []
+            for chunk in chunks:
+                translated, chunk_lang = self._bing_chunk(chunk, source, target)
+                parts.append(translated)
+                if detected is None and chunk_lang:
+                    detected = chunk_lang
+            paragraphs.append(" ".join(parts))
+        return "\n".join(paragraphs), detected
 
-    def _flatten_google_json(self, data: Any) -> str:
-        if isinstance(data, str):
-            return data
-        if isinstance(data, list):
-            if data and isinstance(data[0], str):
-                return "".join(str(x) for x in data if isinstance(x, str))
-            chunks = []
-            for item in data:
-                value = self._flatten_google_json(item)
-                if value:
-                    chunks.append(value)
-            return "".join(chunks)
-        if isinstance(data, dict):
-            for key in ("translatedText", "translation", "text"):
-                value = data.get(key)
-                if isinstance(value, str):
-                    return value
-        return ""
+    def _bing_chunk(
+        self, text: str, source: str, target: str
+    ) -> tuple[str, str | None]:
+        from_lang = "auto-detect" if source == "auto" else source
+        to_lang = BING_LANG_ALIASES.get(target.lower(), target)
+        with self._bing_lock:
+            last_error: Exception | None = None
+            for attempt in range(2):
+                try:
+                    auth = self._bing_auth
+                    if not auth or auth["expires"] <= time.time():
+                        auth = self._bing_refresh_auth()
+                    response = self.session.post(
+                        auth["url"],
+                        data={
+                            "fromLang": from_lang,
+                            "text": text,
+                            "to": to_lang,
+                            "token": auth["token"],
+                            "key": auth["key"],
+                        },
+                        headers={
+                            "Referer": "https://www.bing.com/translator",
+                            "Origin": "https://www.bing.com",
+                        },
+                        timeout=TRANSLATE_TIMEOUT,
+                    )
+                    if response.status_code != 200 or "ShowCaptcha" in response.text:
+                        raise TranslationError(
+                            f"Bing HTTP {response.status_code}"
+                        )
+                    data = response.json()
+                    items = data if isinstance(data, list) else [data]
+                    parts: list[str] = []
+                    detected: str | None = None
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+                        for row in item.get("translations") or []:
+                            if isinstance(row, dict) and row.get("text"):
+                                parts.append(str(row["text"]))
+                        lang = item.get("detectedLanguage") or {}
+                        if isinstance(lang, dict) and lang.get("language"):
+                            detected = str(lang["language"])
+                    translated = "".join(parts)
+                    if translated.strip():
+                        return translated, detected
+                    raise TranslationError("Bing returned no text")
+                except Exception as exc:
+                    last_error = exc
+                    self._bing_auth = None
+                    if attempt == 0:
+                        time.sleep(0.25)
+            raise TranslationError(f"Bing Translate failed: {last_error}")
+
+    def _bing_refresh_auth(self) -> dict[str, Any]:
+        response = self.session.get(
+            "https://www.bing.com/translator", timeout=TRANSLATE_TIMEOUT
+        )
+        if response.status_code != 200:
+            raise TranslationError(f"Bing page HTTP {response.status_code}")
+        page = response.text
+        ig = re.search(r'IG:"([^"]+)"', page)
+        iid = re.search(r'data-iid="(translator\.\d+)"', page)
+        helper = re.search(
+            r'params_AbusePreventionHelper\s*=\s*\[(\d+),"([^"]+)",(\d+)\]',
+            page,
+        )
+        if not (ig and iid and helper):
+            raise TranslationError("Bing translator page changed")
+        key, token, interval_ms = helper.group(1), helper.group(2), int(helper.group(3))
+        self._bing_auth = {
+            "url": (
+                "https://www.bing.com/ttranslatev3"
+                f"?isVertical=1&IG={ig.group(1)}&IID={iid.group(1)}&SFX=1"
+            ),
+            "key": key,
+            "token": token,
+            "expires": time.time() + max(60.0, interval_ms / 1000 - 120),
+        }
+        return self._bing_auth
 
     def _mymemory(self, text: str, source: str, target: str) -> str:
         if source == "auto":

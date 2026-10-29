@@ -40,7 +40,7 @@ export function renderTranslate(ctx) {
       <div class="view-head-copy">
         <span class="eyebrow">Translate</span>
         <h1>Move between <em>English</em> and Tamil.</h1>
-        <p>Write naturally. Chillian uses Google’s translation engine first, then falls back to MyMemory if it needs to. Tamil text is set in a proper Tamil serif.</p>
+        <p>Write naturally. Chillian uses Bing Translator first, then falls back to MyMemory if it needs to. Tamil text is set in a proper Tamil serif.</p>
       </div>
       <div class="view-head-actions">
         <button class="btn btn-secondary btn-sm" type="button" id="clearTranslate">${icon("trash", 14)} Clear</button>

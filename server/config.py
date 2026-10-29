@@ -47,7 +47,7 @@ PDF_TIMEOUT = int(os.getenv("PDF_TIMEOUT", "150"))
 def online_status() -> dict:
     return {
         "translation": {
-            "google": True,
+            "bing": True,
             "mymemory": True,
             "sarvam": bool(SARVAM_API_KEY),
         },
