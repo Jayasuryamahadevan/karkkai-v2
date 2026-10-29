@@ -114,6 +114,9 @@ class ExportRequest(BaseModel):
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     status = online_status()
+    runtime = translation_service.status()
+    status["translation"]["sarvam"] = runtime["available"]["sarvam"]
+    status["translation"]["sarvam_reason"] = runtime.get("sarvam_reason")
     lex = lexicon_status()
     lex_ready = lex.get("ready", False)
     return {

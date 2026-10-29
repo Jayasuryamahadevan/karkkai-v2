@@ -58,8 +58,33 @@ def tamil_ratio(text: str) -> float:
     return tamil / len(visible)
 
 
+SCRIPT_LANGS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"[\u0B80-\u0BFF]"), "ta"),
+    (re.compile(r"[\u0900-\u097F]"), "hi"),
+    (re.compile(r"[\u0C00-\u0C7F]"), "te"),
+    (re.compile(r"[\u0C80-\u0CFF]"), "kn"),
+    (re.compile(r"[\u0D00-\u0D7F]"), "ml"),
+    (re.compile(r"[\u0980-\u09FF]"), "bn"),
+    (re.compile(r"[\u0A80-\u0AFF]"), "gu"),
+    (re.compile(r"[\u0600-\u06FF]"), "ar"),
+    (re.compile(r"[\uAC00-\uD7AF]"), "ko"),
+    (re.compile(r"[\u3040-\u30FF]"), "ja"),
+    (re.compile(r"[\u4E00-\u9FFF]"), "zh"),
+)
+
+
 def detect_source_lang(text: str) -> str:
-    return "ta" if tamil_ratio(text) >= 0.18 else "en"
+    """Detect the source language locally so API auto-detection is not needed."""
+    if any("\u3040" <= ch <= "\u30FF" for ch in text):
+        return "ja"
+    best_code = "en"
+    best_count = 0
+    for pattern, code in SCRIPT_LANGS:
+        count = len(pattern.findall(text))
+        if count > best_count:
+            best_code = code
+            best_count = count
+    return best_code
 
 
 def contains_tamil(text: str) -> bool:

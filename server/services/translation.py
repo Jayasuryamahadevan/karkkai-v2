@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import requests
@@ -60,6 +62,9 @@ SARVAM_LANGS = {
 }
 
 
+_ACCENTED_LATIN_RE = re.compile(r"[\u00C0-\u024F\u1E00-\u1EFF]")
+
+
 class TranslationError(RuntimeError):
     pass
 
@@ -75,6 +80,8 @@ class TranslationService:
             }
         )
         self.cache = TTLCache(ttl_seconds=6 * 3600, max_items=512)
+        self._sarvam_blocked_until = 0.0
+        self._sarvam_block_reason = ""
 
     # ----------------------------------------------------------------- public
     def translate(
@@ -133,9 +140,19 @@ class TranslationService:
         used_provider = ""
         for provider in providers:
             try:
-                if source == "auto" and provider in {"sarvam", "mozhi"}:
-                    detector = self._sarvam if provider == "sarvam" else self._mozhi
-                    translated, detected_by_provider = detector(text, "auto", target)
+                if source == "auto" and provider == "sarvam":
+                    # Local script detection is instant; only let Sarvam detect
+                    # accented Latin text, where English/French/Spanish overlap.
+                    sarvam_source = detected
+                    if detected == "en" and _ACCENTED_LATIN_RE.search(text):
+                        sarvam_source = "auto"
+                    translated, detected_by_provider = self._sarvam(
+                        text, sarvam_source, target
+                    )
+                    if sarvam_source == "auto" and detected_by_provider:
+                        detected = detected_by_provider
+                elif source == "auto" and provider == "mozhi":
+                    translated, detected_by_provider = self._mozhi(text, "auto", target)
                     if detected_by_provider:
                         detected = detected_by_provider
                 else:
@@ -170,13 +187,27 @@ class TranslationService:
         self.cache.set(cache_key, response)
         return response
 
+    def _sarvam_ready(self) -> bool:
+        if not SARVAM_API_KEY:
+            return False
+        return time.time() >= self._sarvam_blocked_until
+
+    def _sarvam_status_reason(self) -> str | None:
+        if not SARVAM_API_KEY:
+            return "no_key"
+        if time.time() < self._sarvam_blocked_until:
+            return self._sarvam_block_reason or "unavailable"
+        return None
+
     def status(self) -> dict[str, Any]:
+        reason = self._sarvam_status_reason()
         return {
             "available": {
                 "mozhi": True,
                 "mymemory": True,
-                "sarvam": bool(SARVAM_API_KEY),
+                "sarvam": reason is None,
             },
+            "sarvam_reason": reason,
             "preferred": TRANSLATION_ENGINE,
             "labels": PROVIDER_LABELS,
         }
@@ -184,13 +215,13 @@ class TranslationService:
     # -------------------------------------------------------------- providers
     def _provider_order(self, preferred: str) -> list[str]:
         if preferred == "mozhi":
-            return ["mozhi", "mymemory"] + (["sarvam"] if SARVAM_API_KEY else [])
+            return ["mozhi", "mymemory"] + (["sarvam"] if self._sarvam_ready() else [])
         if preferred == "mymemory":
-            return ["mymemory", "mozhi"] + (["sarvam"] if SARVAM_API_KEY else [])
+            return ["mymemory", "mozhi"] + (["sarvam"] if self._sarvam_ready() else [])
         if preferred == "sarvam":
-            return (["sarvam"] if SARVAM_API_KEY else []) + ["mozhi", "mymemory"]
+            return (["sarvam"] if self._sarvam_ready() else []) + ["mozhi", "mymemory"]
         # Prefer Sarvam when its key is configured: it has the best Tamil quality.
-        order = (["sarvam"] if SARVAM_API_KEY else []) + ["mozhi", "mymemory"]
+        order = (["sarvam"] if self._sarvam_ready() else []) + ["mozhi", "mymemory"]
         return order
 
     def _translate_with(
@@ -221,14 +252,24 @@ class TranslationService:
             if not paragraph.strip():
                 paragraphs.append("")
                 continue
-            chunks = group_chunks(split_sentences(paragraph), 1500) or [paragraph]
-            parts: list[str] = []
-            for chunk in chunks:
-                translated, chunk_lang = self._mozhi_chunk(chunk, source, target)
-                parts.append(translated)
-                if detected is None and chunk_lang:
-                    detected = chunk_lang
+            chunks = group_chunks(split_sentences(paragraph), 1200) or [paragraph]
+            if len(chunks) == 1:
+                translated, chunk_lang = self._mozhi_chunk(chunks[0], source, target)
+                parts = [translated]
+                chunk_langs = [chunk_lang]
+            else:
+                with ThreadPoolExecutor(max_workers=min(4, len(chunks))) as pool:
+                    results = list(
+                        pool.map(
+                            lambda chunk: self._mozhi_chunk(chunk, source, target),
+                            chunks,
+                        )
+                    )
+                parts = [item[0] for item in results]
+                chunk_langs = [item[1] for item in results]
             paragraphs.append(" ".join(parts))
+            if detected is None:
+                detected = next((lang for lang in chunk_langs if lang), None)
         return "\n".join(paragraphs), detected
 
     def _mozhi_chunk(
@@ -297,8 +338,8 @@ class TranslationService:
     def _sarvam(
         self, text: str, source: str, target: str
     ) -> tuple[str, str | None]:
-        if not SARVAM_API_KEY:
-            raise TranslationError("Sarvam API key is not configured")
+        if not self._sarvam_ready():
+            raise TranslationError("Sarvam is not available")
         if source != "auto" and source not in SARVAM_LANGS:
             raise TranslationError("Sarvam does not support this language")
         if target not in SARVAM_LANGS:
@@ -310,23 +351,38 @@ class TranslationService:
             if not paragraph.strip():
                 paragraphs.append("")
                 continue
-            # mayura:v1 accepts at most 1000 characters per request.
-            chunks = group_chunks(split_sentences(paragraph), 950) or [paragraph]
-            parts: list[str] = []
-            for chunk in chunks:
-                translated, chunk_lang = self._sarvam_chunk(chunk, source, target)
-                parts.append(translated)
-                if detected is None and chunk_lang:
-                    detected = chunk_lang
+            # Keep each request short: above ~450 characters Sarvam switches to
+            # a much slower decoding path, so smaller parallel chunks are faster.
+            chunks = group_chunks(split_sentences(paragraph), 400) or [paragraph]
+            if len(chunks) == 1:
+                translated, chunk_lang = self._sarvam_chunk(chunks[0], source, target)
+                parts = [translated]
+                chunk_langs = [chunk_lang]
+            else:
+                # Long text is split into sentences; translating several chunks
+                # concurrently keeps total latency close to one API call.
+                with ThreadPoolExecutor(max_workers=min(8, len(chunks))) as pool:
+                    results = list(
+                        pool.map(
+                            lambda chunk: self._sarvam_chunk(chunk, source, target),
+                            chunks,
+                        )
+                    )
+                parts = [item[0] for item in results]
+                chunk_langs = [item[1] for item in results]
             paragraphs.append(" ".join(parts))
+            if detected is None:
+                detected = next((lang for lang in chunk_langs if lang), None)
         return "\n".join(paragraphs), detected
 
     def _sarvam_chunk(
         self, text: str, source: str, target: str
     ) -> tuple[str, str | None]:
+        if not self._sarvam_ready():
+            raise TranslationError("Sarvam is not available")
         source_code = "auto" if source == "auto" else SARVAM_LANGS[source]
         last_error: Exception | None = None
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 response = self.session.post(
                     "https://api.sarvam.ai/translate",
@@ -343,8 +399,16 @@ class TranslationService:
                         "model": SARVAM_TRANSLATE_MODEL,
                         "enable_preprocessing": True,
                     },
-                    timeout=SARVAM_TIMEOUT,
+                    timeout=(4, SARVAM_TIMEOUT),
                 )
+                if response.status_code in (401, 403, 402):
+                    # Bad key or exhausted credits will not fix themselves.
+                    # Stop calling Sarvam for an hour so fallbacks stay fast.
+                    reason = "no_credits" if response.status_code == 402 else "invalid_key"
+                    self._sarvam_blocked_until = time.time() + 3600
+                    self._sarvam_block_reason = reason
+                    logger.warning("Sarvam disabled for an hour: %s", reason)
+                    raise TranslationError(f"Sarvam unavailable: {reason}")
                 if response.status_code == 429 or response.status_code >= 500:
                     # Rate limits and server errors are worth retrying.
                     raise requests.HTTPError(
@@ -373,10 +437,13 @@ class TranslationService:
                 return translated, detected
             except TranslationError:
                 raise
-            except Exception as exc:  # timeouts / connection resets
+            except requests.exceptions.Timeout as exc:
+                # A slow Sarvam is worse than a fast fallback; do not retry.
+                raise TranslationError(f"Sarvam timed out: {exc}") from exc
+            except Exception as exc:  # connection resets, 429/5xx
                 last_error = exc
-                if attempt < 2:
-                    time.sleep(0.6 * (attempt + 1))
+                if attempt == 0:
+                    time.sleep(0.3)
                     continue
                 raise TranslationError(f"Sarvam connection failed: {exc}") from exc
         raise TranslationError(f"Sarvam failed: {last_error}")
