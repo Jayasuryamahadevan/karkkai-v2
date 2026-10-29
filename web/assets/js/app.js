@@ -317,15 +317,6 @@ function settingsMarkup() {
   const prefs = appState.prefs;
   const extraWords = loadExtraWords();
   const recents = loadRecents();
-  const sarvamTranslation = Boolean(online?.translation?.sarvam);
-  const sarvamReason = online?.translation?.sarvam_reason;
-  const sarvamNote = sarvamTranslation
-    ? ""
-    : sarvamReason === "no_credits"
-      ? " · no credits"
-      : sarvamReason === "invalid_key"
-        ? " · invalid key"
-        : " · key needed";
   const sarvamTts = Boolean(online?.tts?.sarvam);
   const serverStt = Array.isArray(health?.stt?.server_available) ? health.stt.server_available : [];
   const lexicon = health?.lexicon;
@@ -336,12 +327,11 @@ function settingsMarkup() {
       <p>Translation and voice use online services. Choose a preference; Chillian quietly falls back if an engine is unavailable.</p>
       <div class="settings-card">
         <div class="settings-row">
-          <div class="row-copy"><strong>Translation</strong><span>Sarvam AI is the default. Yandex and MyMemory are the fallbacks.</span></div>
+          <div class="row-copy"><strong>Translation</strong><span>Google Translate is the default. MyMemory is the fallback.</span></div>
           <select class="select" data-pref="translateEngine" aria-label="Translation engine">
             <option value="auto" ${prefs.translateEngine === "auto" ? "selected" : ""}>Auto</option>
-            <option value="mozhi" ${prefs.translateEngine === "mozhi" ? "selected" : ""}>Yandex</option>
+            <option value="google" ${prefs.translateEngine === "google" ? "selected" : ""}>Google</option>
             <option value="mymemory" ${prefs.translateEngine === "mymemory" ? "selected" : ""}>MyMemory</option>
-            <option value="sarvam" ${prefs.translateEngine === "sarvam" ? "selected" : ""} ${sarvamTranslation ? "" : "disabled"}>Sarvam${sarvamNote}</option>
           </select>
         </div>
         <div class="settings-row">
@@ -371,8 +361,7 @@ function settingsMarkup() {
       <p>${health ? `Checked ${new Date(appState.healthAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} · local server ${health.version || ""}` : "The local server has not answered yet."}</p>
       <div class="settings-card">
         <div class="status-list">
-          ${statusItem("Sarvam AI", sarvamTranslation, sarvamTranslation ? "Online" : sarvamReason === "no_credits" ? "No credits" : sarvamReason === "invalid_key" ? "Invalid key" : "No key")}
-          ${statusItem("Yandex Translator", Boolean(online?.translation?.mozhi), "Online")}
+          ${statusItem("Google Translate", Boolean(online?.translation?.google), "Online")}
           ${statusItem("MyMemory fallback", Boolean(online?.translation?.mymemory), "Online")}
           ${statusItem("Google speech voice", Boolean(online?.tts?.google), "Online")}
           ${statusItem("Uploaded-audio STT", serverStt.length > 0, "Key needed")}
@@ -383,7 +372,7 @@ function settingsMarkup() {
       </div>
       <div class="settings-note">
         <b>Optional keys.</b> Copy <code>.env.example</code> to <code>.env</code> and add
-        <code>SARVAM_API_KEY</code> for Sarvam translation, voice and audio upload, or
+        <code>SARVAM_API_KEY</code> for Sarvam voice and audio upload, or
         <code>OPENAI_API_KEY</code> for Whisper transcription. Restart the server after editing.
       </div>
       <div class="settings-actions">

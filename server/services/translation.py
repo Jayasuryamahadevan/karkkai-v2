@@ -2,19 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import requests
 
 from server.config import (
-    MOZHI_HOSTS,
     MYMEMORY_EMAIL,
-    SARVAM_API_KEY,
-    SARVAM_TIMEOUT,
-    SARVAM_TRANSLATE_MODEL,
     TRANSLATE_TIMEOUT,
     TRANSLATION_ENGINE,
 )
@@ -35,34 +29,9 @@ USER_AGENT = (
 )
 
 PROVIDER_LABELS = {
-    "mozhi": "Yandex Translator",
+    "google": "Google Translate",
     "mymemory": "MyMemory",
-    "sarvam": "Sarvam AI",
 }
-
-# Mozhi delegates to Yandex, which uses slightly different codes for Chinese.
-MOZHI_LANG_ALIASES = {
-    "zh-cn": "zh",
-    "zh-tw": "zh",
-    "zh": "zh",
-}
-
-SARVAM_LANGS = {
-    "en": "en-IN",
-    "ta": "ta-IN",
-    "hi": "hi-IN",
-    "te": "te-IN",
-    "ml": "ml-IN",
-    "kn": "kn-IN",
-    "bn": "bn-IN",
-    "gu": "gu-IN",
-    "mr": "mr-IN",
-    "pa": "pa-IN",
-    "od": "od-IN",
-}
-
-
-_ACCENTED_LATIN_RE = re.compile(r"[\u00C0-\u024F\u1E00-\u1EFF]")
 
 
 class TranslationError(RuntimeError):
@@ -80,8 +49,6 @@ class TranslationService:
             }
         )
         self.cache = TTLCache(ttl_seconds=6 * 3600, max_items=512)
-        self._sarvam_blocked_until = 0.0
-        self._sarvam_block_reason = ""
 
     # ----------------------------------------------------------------- public
     def translate(
@@ -109,7 +76,7 @@ class TranslationService:
             }
 
         preferred = (engine or TRANSLATION_ENGINE or "auto").strip().lower()
-        if preferred not in {"auto", "mozhi", "mymemory", "sarvam"}:
+        if preferred not in {"auto", "google", "mymemory"}:
             preferred = "auto"
 
         cache_key = (
@@ -131,28 +98,14 @@ class TranslationService:
             detected = detect_source_lang(text)
 
         providers = self._provider_order(preferred)
-        if not providers:
-            raise TranslationError("No translation provider is available")
-
         warnings: list[str] = []
         last_error: Exception | None = None
         result: dict[str, Any] | None = None
         used_provider = ""
-        for provider in providers:
+        for index, provider in enumerate(providers):
             try:
-                if source == "auto" and provider == "sarvam":
-                    # Local script detection is instant; only let Sarvam detect
-                    # accented Latin text, where English/French/Spanish overlap.
-                    sarvam_source = detected
-                    if detected == "en" and _ACCENTED_LATIN_RE.search(text):
-                        sarvam_source = "auto"
-                    translated, detected_by_provider = self._sarvam(
-                        text, sarvam_source, target
-                    )
-                    if sarvam_source == "auto" and detected_by_provider:
-                        detected = detected_by_provider
-                elif source == "auto" and provider == "mozhi":
-                    translated, detected_by_provider = self._mozhi(text, "auto", target)
+                if source == "auto" and provider == "google":
+                    translated, detected_by_provider = self._google(text, "auto", target)
                     if detected_by_provider:
                         detected = detected_by_provider
                 else:
@@ -165,9 +118,11 @@ class TranslationService:
             except Exception as exc:  # provider failures are expected; try next
                 logger.warning("Translation provider %s failed: %s", provider, exc)
                 last_error = exc
-                if provider == providers[-1]:
+                if index == len(providers) - 1:
                     break
-                warnings.append(f"{PROVIDER_LABELS.get(provider, provider)} was unavailable; using a fallback.")
+                warnings.append(
+                    f"{PROVIDER_LABELS.get(provider, provider)} was unavailable; using a fallback."
+                )
 
         if result is None:
             raise TranslationError(
@@ -187,125 +142,119 @@ class TranslationService:
         self.cache.set(cache_key, response)
         return response
 
-    def _sarvam_ready(self) -> bool:
-        if not SARVAM_API_KEY:
-            return False
-        return time.time() >= self._sarvam_blocked_until
-
-    def _sarvam_status_reason(self) -> str | None:
-        if not SARVAM_API_KEY:
-            return "no_key"
-        if time.time() < self._sarvam_blocked_until:
-            return self._sarvam_block_reason or "unavailable"
-        return None
-
     def status(self) -> dict[str, Any]:
-        reason = self._sarvam_status_reason()
         return {
             "available": {
-                "mozhi": True,
+                "google": True,
                 "mymemory": True,
-                "sarvam": reason is None,
             },
-            "sarvam_reason": reason,
             "preferred": TRANSLATION_ENGINE,
             "labels": PROVIDER_LABELS,
         }
 
     # -------------------------------------------------------------- providers
     def _provider_order(self, preferred: str) -> list[str]:
-        if preferred == "mozhi":
-            return ["mozhi", "mymemory"] + (["sarvam"] if self._sarvam_ready() else [])
         if preferred == "mymemory":
-            return ["mymemory", "mozhi"] + (["sarvam"] if self._sarvam_ready() else [])
-        if preferred == "sarvam":
-            return (["sarvam"] if self._sarvam_ready() else []) + ["mozhi", "mymemory"]
-        # Prefer Sarvam when its key is configured: it has the best Tamil quality.
-        order = (["sarvam"] if self._sarvam_ready() else []) + ["mozhi", "mymemory"]
-        return order
+            return ["mymemory", "google"]
+        return ["google", "mymemory"]
 
     def _translate_with(
         self, provider: str, text: str, source: str, target: str
     ) -> str:
-        if provider == "mozhi":
-            translated, _ = self._mozhi(text, source, target)
+        if provider == "google":
+            translated, _ = self._google(text, source, target)
             return translated
         if provider == "mymemory":
             return self._mymemory(text, source, target)
-        if provider == "sarvam":
-            translated, _ = self._sarvam(text, source, target)
-            return translated
         raise TranslationError(f"Unknown translation provider: {provider}")
 
-    def _mozhi(
+    def _google(
         self, text: str, source: str, target: str
     ) -> tuple[str, str | None]:
-        """Translate through a public Mozhi instance (Yandex engine).
+        """Translate with Google's own public web endpoint.
 
-        Mozhi is a free, open-source translation front-end that needs no account
-        or API key. We try several public instances in order so a single outage
-        does not break translation.
+        This is the same endpoint Google's web widgets use: no account, API key
+        or third-party proxy is involved. It accepts POST, so Tamil text up to
+        the app limit fits in a single request and newlines are preserved.
         """
-        paragraphs: list[str] = []
-        detected: str | None = None
-        for paragraph in split_paragraphs(text):
-            if not paragraph.strip():
-                paragraphs.append("")
-                continue
-            chunks = group_chunks(split_sentences(paragraph), 1200) or [paragraph]
-            if len(chunks) == 1:
-                translated, chunk_lang = self._mozhi_chunk(chunks[0], source, target)
-                parts = [translated]
-                chunk_langs = [chunk_lang]
-            else:
-                with ThreadPoolExecutor(max_workers=min(4, len(chunks))) as pool:
-                    results = list(
-                        pool.map(
-                            lambda chunk: self._mozhi_chunk(chunk, source, target),
-                            chunks,
-                        )
-                    )
-                parts = [item[0] for item in results]
-                chunk_langs = [item[1] for item in results]
-            paragraphs.append(" ".join(parts))
-            if detected is None:
-                detected = next((lang for lang in chunk_langs if lang), None)
-        return "\n".join(paragraphs), detected
-
-    def _mozhi_chunk(
-        self, text: str, source: str, target: str
-    ) -> tuple[str, str | None]:
-        to_lang = MOZHI_LANG_ALIASES.get(target.lower(), target)
+        params = {
+            "client": "at",
+            "sl": source,
+            "tl": target,
+            "hl": "en",
+            "dt": "t",
+        }
         last_error: Exception | None = None
-        for host in MOZHI_HOSTS:
+        for attempt in range(2):
             try:
-                response = self.session.get(
-                    f"{host}/api/translate",
-                    params={
-                        "engine": "yandex",
-                        "from": source,
-                        "to": to_lang,
-                        "text": text,
-                    },
+                response = self.session.post(
+                    "https://translate.google.com/translate_a/single",
+                    params=params,
+                    data={"q": text},
                     timeout=TRANSLATE_TIMEOUT,
                 )
                 if response.status_code != 200:
-                    raise TranslationError(f"Mozhi HTTP {response.status_code}")
-                payload = response.json()
-                translated = (
-                    payload.get("translated-text")
-                    or payload.get("translated_text")
-                    or ""
+                    raise TranslationError(f"Google HTTP {response.status_code}")
+                data = response.json()
+                segments = data[0] if isinstance(data, list) and data else []
+                translated = "".join(
+                    str(seg[0])
+                    for seg in segments
+                    if isinstance(seg, list) and seg and seg[0]
                 )
-                if not str(translated).strip():
-                    raise TranslationError("Mozhi returned no text")
-                lang = payload.get("detected") or None
-                return str(translated), (str(lang) if lang else None)
+                detected = None
+                if len(data) > 2 and isinstance(data[2], str):
+                    detected = data[2]
+                if translated.strip():
+                    return translated, detected
+                raise TranslationError("Google returned no text")
             except Exception as exc:
                 last_error = exc
-                logger.warning("Mozhi host %s failed: %s", host, exc)
-                continue
-        raise TranslationError(f"Mozhi Translate failed: {last_error}")
+                if attempt == 0:
+                    time.sleep(0.2)
+
+        # A second Google endpoint is useful when the main one is rate-limited.
+        translated = self._google_clients5(text, source, target)
+        if translated.strip():
+            return translated, None
+        raise TranslationError(f"Google Translate failed: {last_error}")
+
+    def _google_clients5(self, text: str, source: str, target: str) -> str:
+        parts: list[str] = []
+        for chunk in group_chunks(split_sentences(text), 1400) or [text[:1400]]:
+            response = self.session.get(
+                "https://clients5.google.com/translate_a/t",
+                params={
+                    "client": "dict-chrome-ex",
+                    "sl": source,
+                    "tl": target,
+                    "q": chunk,
+                },
+                timeout=TRANSLATE_TIMEOUT,
+            )
+            if response.status_code != 200:
+                raise TranslationError(f"Google HTTP {response.status_code}")
+            parts.append(self._flatten_google_json(response.json()))
+        return " ".join(part for part in parts if part)
+
+    def _flatten_google_json(self, data: Any) -> str:
+        if isinstance(data, str):
+            return data
+        if isinstance(data, list):
+            if data and isinstance(data[0], str):
+                return "".join(str(x) for x in data if isinstance(x, str))
+            chunks = []
+            for item in data:
+                value = self._flatten_google_json(item)
+                if value:
+                    chunks.append(value)
+            return "".join(chunks)
+        if isinstance(data, dict):
+            for key in ("translatedText", "translation", "text"):
+                value = data.get(key)
+                if isinstance(value, str):
+                    return value
+        return ""
 
     def _mymemory(self, text: str, source: str, target: str) -> str:
         if source == "auto":
@@ -334,119 +283,6 @@ class TranslationService:
                 raise TranslationError("MyMemory returned no text")
             results.append(translated)
         return " ".join(results)
-
-    def _sarvam(
-        self, text: str, source: str, target: str
-    ) -> tuple[str, str | None]:
-        if not self._sarvam_ready():
-            raise TranslationError("Sarvam is not available")
-        if source != "auto" and source not in SARVAM_LANGS:
-            raise TranslationError("Sarvam does not support this language")
-        if target not in SARVAM_LANGS:
-            raise TranslationError("Sarvam does not support this language")
-
-        paragraphs: list[str] = []
-        detected: str | None = None
-        for paragraph in split_paragraphs(text):
-            if not paragraph.strip():
-                paragraphs.append("")
-                continue
-            # Keep each request short: above ~450 characters Sarvam switches to
-            # a much slower decoding path, so smaller parallel chunks are faster.
-            chunks = group_chunks(split_sentences(paragraph), 400) or [paragraph]
-            if len(chunks) == 1:
-                translated, chunk_lang = self._sarvam_chunk(chunks[0], source, target)
-                parts = [translated]
-                chunk_langs = [chunk_lang]
-            else:
-                # Long text is split into sentences; translating several chunks
-                # concurrently keeps total latency close to one API call.
-                with ThreadPoolExecutor(max_workers=min(8, len(chunks))) as pool:
-                    results = list(
-                        pool.map(
-                            lambda chunk: self._sarvam_chunk(chunk, source, target),
-                            chunks,
-                        )
-                    )
-                parts = [item[0] for item in results]
-                chunk_langs = [item[1] for item in results]
-            paragraphs.append(" ".join(parts))
-            if detected is None:
-                detected = next((lang for lang in chunk_langs if lang), None)
-        return "\n".join(paragraphs), detected
-
-    def _sarvam_chunk(
-        self, text: str, source: str, target: str
-    ) -> tuple[str, str | None]:
-        if not self._sarvam_ready():
-            raise TranslationError("Sarvam is not available")
-        source_code = "auto" if source == "auto" else SARVAM_LANGS[source]
-        last_error: Exception | None = None
-        for attempt in range(2):
-            try:
-                response = self.session.post(
-                    "https://api.sarvam.ai/translate",
-                    headers={
-                        "api-subscription-key": SARVAM_API_KEY,
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "input": text,
-                        "source_language_code": source_code,
-                        "target_language_code": SARVAM_LANGS[target],
-                        "speaker_gender": "Female",
-                        "mode": "formal",
-                        "model": SARVAM_TRANSLATE_MODEL,
-                        "enable_preprocessing": True,
-                    },
-                    timeout=(4, SARVAM_TIMEOUT),
-                )
-                if response.status_code in (401, 403, 402):
-                    # Bad key or exhausted credits will not fix themselves.
-                    # Stop calling Sarvam for an hour so fallbacks stay fast.
-                    reason = "no_credits" if response.status_code == 402 else "invalid_key"
-                    self._sarvam_blocked_until = time.time() + 3600
-                    self._sarvam_block_reason = reason
-                    logger.warning("Sarvam disabled for an hour: %s", reason)
-                    raise TranslationError(f"Sarvam unavailable: {reason}")
-                if response.status_code == 429 or response.status_code >= 500:
-                    # Rate limits and server errors are worth retrying.
-                    raise requests.HTTPError(
-                        f"Sarvam HTTP {response.status_code}", response=response
-                    )
-                if response.status_code >= 400:
-                    # 4xx (bad key, bad language, too much text) will not fix
-                    # itself by retrying.
-                    raise TranslationError(
-                        f"Sarvam HTTP {response.status_code}: {response.text[:160]}"
-                    )
-                payload = response.json()
-                translated = (
-                    payload.get("translated_text")
-                    or payload.get("translation")
-                    or payload.get("output")
-                )
-                if not isinstance(translated, str) or not translated.strip():
-                    raise TranslationError("Sarvam returned no text")
-                lang = payload.get("source_language_code")
-                detected = (
-                    str(lang).split("-")[0]
-                    if isinstance(lang, str) and lang
-                    else None
-                )
-                return translated, detected
-            except TranslationError:
-                raise
-            except requests.exceptions.Timeout as exc:
-                # A slow Sarvam is worse than a fast fallback; do not retry.
-                raise TranslationError(f"Sarvam timed out: {exc}") from exc
-            except Exception as exc:  # connection resets, 429/5xx
-                last_error = exc
-                if attempt == 0:
-                    time.sleep(0.3)
-                    continue
-                raise TranslationError(f"Sarvam connection failed: {exc}") from exc
-        raise TranslationError(f"Sarvam failed: {last_error}")
 
 
 # ------------------------------------------------------------------ helpers

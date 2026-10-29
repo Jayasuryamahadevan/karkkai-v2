@@ -126,7 +126,7 @@ function detailMarkup(data, categories) {
         <button class="btn btn-sm btn-primary" type="button" data-word-action="translate">${icon("translate", 13)} Use in translate</button>
         <button class="btn btn-sm btn-ghost" type="button" data-word-action="copy">${icon("copy", 13)} Copy</button>
       </div>
-      ${isOnline ? `<div class="note green">${icon("info", 15)}<span>This concept had no local match, so Chillian translated “${escapeHtml(data.query)}” online with ${escapeHtml(data.engine || "Sarvam AI")}. The word details below come from the local index.</span></div>` : ""}
+      ${isOnline ? `<div class="note green">${icon("info", 15)}<span>This concept had no local match, so Chillian translated “${escapeHtml(data.query)}” online with ${escapeHtml(data.engine || "Google Translate")}. The word details below come from the local index.</span></div>` : ""}
       ${!data.known && !isOnline ? `<div class="note warn">${icon("info", 15)}<span>This word is not in the local index. The closest forms and roots are shown below; check the spelling if something looks unfamiliar.</span></div>` : ""}
       ${sections || `<div class="note">${icon("info", 15)}<span>The local dictionary has a meaning for this word, but no example or related forms yet.</span></div>`}
     </div>
