@@ -13,7 +13,7 @@
 window.CHILLIAN_CONFIG = Object.assign(
   {
     apiBase: "",
-    staticMode: "auto",
+    staticMode: "always",
     translateProxy: "https://clients5.google.com/translate_a/t",
     transliterateProxy: "https://inputtools.google.com/request",
     ttsProxy: "",
