@@ -1,4 +1,5 @@
 import { api, errorMessage } from "./api.js";
+import { STATIC_PREFERENCE } from "./config.js";
 import {
   clearExtraWords,
   clearRecents,
@@ -20,7 +21,6 @@ import { renderTranslate } from "./views/translate.js";
 import { renderVoice } from "./views/voice.js";
 import { renderSpellcheck } from "./views/spellcheck.js";
 import { renderWords } from "./views/words.js";
-import { renderPdf } from "./views/pdf.js";
 
 const VIEWS = {
   home: { title: "Home", render: renderHome },
@@ -28,7 +28,6 @@ const VIEWS = {
   voice: { title: "Voice", render: renderVoice },
   spellcheck: { title: "Spell check", render: renderSpellcheck },
   words: { title: "Word finder", render: renderWords },
-  pdf: { title: "PDF studio", render: renderPdf },
 };
 
 const NAV = [
@@ -39,7 +38,6 @@ const NAV = [
   { section: "Tamil tools" },
   { id: "spellcheck", label: "Spell check", ta: "எழுத்து", icon: "spell" },
   { id: "words", label: "Word finder", ta: "சொல்", icon: "book" },
-  { id: "pdf", label: "PDF studio", ta: "ஆவணம்", icon: "file" },
 ];
 
 const FALLBACK_LANGUAGES = [
@@ -84,6 +82,7 @@ let lastHash = "";
 
 /* ------------------------------------------------------------------ health */
 export async function ensureHealth(force = false) {
+  if (STATIC_PREFERENCE) return null;
   if (!force && appState.health && Date.now() - appState.healthAt < 45000) {
     return appState.health;
   }
@@ -110,6 +109,7 @@ export async function ensureHealth(force = false) {
 }
 
 export async function ensureLanguages() {
+  if (STATIC_PREFERENCE) return appState.languages;
   if (appState.languagesLoaded) return appState.languages;
   if (languagesPromise) return languagesPromise;
   languagesPromise = api
@@ -129,6 +129,21 @@ export async function ensureLanguages() {
 }
 
 function paintConnection(state = null) {
+  if (STATIC_PREFERENCE) {
+    const dot = document.getElementById("statusDot");
+    const title = document.getElementById("connectionTitle");
+    const text = document.getElementById("connectionText");
+    const netDot = document.querySelector("#netPill .status-dot");
+    const netLabel = document.getElementById("netLabel");
+    if (dot) dot.className = `status-dot ${navigator.onLine ? "online" : "offline"}`;
+    if (netDot) netDot.className = `status-dot ${navigator.onLine ? "online" : "offline"}`;
+    if (title) title.textContent = navigator.onLine ? "Browser mode" : "You are offline";
+    if (text) text.textContent = "Dictionary and spelling run locally in your browser";
+    if (netLabel) netLabel.textContent = navigator.onLine ? "Browser" : "Offline";
+    const card = document.getElementById("connectionCard");
+    if (card) card.title = "Static deployment: local tools run in your browser; translation and speech may need internet access.";
+    return;
+  }
   const dot = document.getElementById("statusDot");
   const title = document.getElementById("connectionTitle");
   const text = document.getElementById("connectionText");
